@@ -48,6 +48,7 @@ class Paper:
     tldr: Optional[str] = None
     affiliations: Optional[list[str]] = None
     score: Optional[float] = None
+    journal: Optional[str] = None
 
     def _generate_tldr_with_llm(self, openai_client:OpenAI,llm_params:dict) -> str:
         lang = llm_params.get('language', 'English')
@@ -61,6 +62,8 @@ class Paper:
         if self.full_text:
             prompt += f"Preview of main content:\n {self.full_text}\n\n"
 
+        if self.journal and not self.full_text and not self.abstract:
+            return "Crossref 未提供摘要，此条按标题匹配。请打开 DOI 查看原文。"
         if not self.full_text and not self.abstract:
             logger.warning(f"Neither full text nor abstract is provided for {self.url}")
             return "Failed to generate TLDR. Neither full text nor abstract is provided"

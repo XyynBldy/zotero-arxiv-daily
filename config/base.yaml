@@ -5,6 +5,9 @@ zotero:
   ignore_path: null # A list of glob patterns marking the Zotero collections that should be excluded. Example: ["2026/ignore/**","archive/**"]
 
 source:
+  journals:
+    issns: ["1365-1609", "0723-2632", "2095-2686"]
+    lookback_days: 1  # Complete UTC days before today, by first DOI deposit.
   arxiv:
     category: null # The categories of target arxiv papers. Find the abbr of your research area from [here](https://arxiv.org/category_taxonomy). Example: ["cs.AI","cs.CV","cs.LG","cs.CL"]
     include_cross_list: false # Whether to include arXiv cross-list papers in subscribed categories. Example: true

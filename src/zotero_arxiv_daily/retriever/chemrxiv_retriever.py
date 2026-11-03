@@ -1,18 +1,16 @@
-import html
 import re
 from datetime import datetime, timedelta, timezone
-from time import sleep
 from typing import Any
 
-import requests
 from loguru import logger
 
-from .base import BaseRetriever, register_retriever
+from .base import register_retriever
+from .crossref_base import CrossrefBase
 from ..protocol import Paper
 
 
 @register_retriever("chemrxiv")
-class ChemrxivRetriever(BaseRetriever):
+class ChemrxivRetriever(CrossrefBase):
     """Retrieve recent chemRxiv preprints via the Crossref REST API.
 
     chemRxiv moved from Cambridge Open Engage to Wiley's Research Exchange platform
@@ -33,31 +31,7 @@ class ChemrxivRetriever(BaseRetriever):
     page_size = 100
     max_pages = 20
     lookback_hours = 24
-    request_headers = {
-        "User-Agent": "zotero-arxiv-daily (https://github.com/TideDra/zotero-arxiv-daily)",
-        "Accept": "application/json",
-    }
     _version_suffix = re.compile(r"[/-]v(\d+)$", re.IGNORECASE)
-    _tag = re.compile(r"<[^>]+>")
-
-    def _get_json(self, params: dict[str, Any]) -> dict[str, Any]:
-        retry_num = 10
-        delay_time = 10
-        for i in range(retry_num):
-            try:
-                response = requests.get(
-                    self.api_url,
-                    params=params,
-                    headers=self.request_headers,
-                    timeout=60,
-                )
-                response.raise_for_status()
-                return response.json()
-            except Exception as exc:
-                if i == retry_num - 1:
-                    raise
-                logger.warning(f"Failed to retrieve papers: {exc}. Retry in {delay_time} seconds.")
-                sleep(delay_time)
 
     @staticmethod
     def _parse_date(value: str | None) -> datetime | None:
@@ -113,20 +87,6 @@ class ChemrxivRetriever(BaseRetriever):
         if self.config.executor.debug:
             collection = collection[:10]
         return collection
-
-    @classmethod
-    def _clean_text(cls, text: str | None) -> str:
-        if not text:
-            return ""
-        text = cls._tag.sub(" ", text)
-        text = html.unescape(text)
-        return re.sub(r"\s+", " ", text).strip()
-
-    @staticmethod
-    def _author_name(author: dict[str, Any]) -> str:
-        if author.get("name"):
-            return author["name"].strip()
-        return f"{author.get('given', '')} {author.get('family', '')}".strip()
 
     def convert_to_paper(self, raw_paper: dict[str, Any]) -> Paper | None:
         doi = raw_paper["DOI"]
