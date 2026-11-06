@@ -20,5 +20,15 @@ journals:
     issn: "2095-2686"
     rss: ""
 
+  - name: Journal of Rock Mechanics and Geotechnical Engineering
+    issn: "1674-7755"
+    rss: "https://rss.sciencedirect.com/publication/science/16747755"
+  - name: Tunnelling and Underground Space Technology
+    issn: "0886-7798"
+    rss: "https://rss.sciencedirect.com/publication/science/08867798"
+  - name: Computers and Geotechnics
+    issn: "0266-352X"
+    rss: "https://rss.sciencedirect.com/publication/science/0266352X"
+
 # 本配置所列期刊为初始示例，可任意增删。每项至少指定 issn 或 rss。
 # 可以只提供 rss，或者 issn + rss（两种来源自动去重）。
