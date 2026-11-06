@@ -1,0 +1,24 @@
+# 独立于原来的 Zotero/arXiv 推荐邮件；期刊增量目录不执行全文下载或 AI 评分。
+# 以 UTC 计算检索范围；时间窗用于容忍出版商元数据延迟，是否已推送由 state 文件判断。
+lookback_days: 7
+send_when_empty: false
+crossref:
+  timeout_seconds: 25
+  rows_per_page: 100
+  max_records_per_query: 5000
+  # 可选：给 Crossref 礼貌池提供联系邮箱，非必需
+  contact_email: ""
+
+journals:
+  - name: International Journal of Rock Mechanics and Mining Sciences
+    issn: "1365-1609"
+    rss: ""  # 核实真实 RSS URL 后填入；保留 Crossref 作为兜底
+  - name: Rock Mechanics and Rock Engineering
+    issn: "0723-2632"
+    rss: ""
+  - name: International Journal of Mining Science and Technology
+    issn: "2095-2686"
+    rss: ""
+
+# 本配置所列期刊为初始示例，可任意增删。每项至少指定 issn 或 rss。
+# 可以只提供 rss，或者 issn + rss（两种来源自动去重）。
