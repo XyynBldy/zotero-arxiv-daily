@@ -9,6 +9,8 @@ from datetime import date
 from pathlib import Path
 from unittest.mock import patch
 
+import requests
+
 MODULE_PATH = Path(__file__).resolve().parents[1] / 'scripts' / 'journal_digest.py'
 spec = importlib.util.spec_from_file_location('journal_digest', MODULE_PATH)
 jd = importlib.util.module_from_spec(spec)
@@ -78,6 +80,53 @@ class DigestTests(unittest.TestCase):
         self.assertEqual(a[0]['doi'], '10.1234/abc')
         self.assertEqual(b[0]['doi'], '10.1234/xyz')
         self.assertEqual(b[0]['pub_date'], date(2026, 11, 4))
+
+
+    def test_sciencedirect_rss_namespaces_and_date_priority(self):
+        # Synthetic sample, not a claim about the live RSS fields.
+        feed = b'''<rss xmlns:dc="http://purl.org/dc/elements/1.1/"
+                      xmlns:prism="http://prismstandard.org/namespaces/basic/2.0/">
+          <channel><item><title>New rock mechanics paper</title>
+            <dc:identifier>doi:10.1016/j.ijrmms.2026.106800</dc:identifier>
+            <prism:coverDate>2027-03-01</prism:coverDate>
+            <dc:date>2026-11-05T22:30:00-05:00</dc:date>
+            <prism:publicationDate>2026-11-04</prism:publicationDate>
+            <link>https://www.sciencedirect.com/science/article/pii/S1365160926000000</link>
+          </item></channel></rss>'''
+        papers = jd.fetch_rss(DummySession([DummyResponse(content=feed)]),
+                              'https://rss.sciencedirect.com/publication/science/13651609',
+                              'IJRMMS', 10)
+        self.assertEqual(len(papers), 1)
+        self.assertEqual(papers[0]['doi'], '10.1016/j.ijrmms.2026.106800')
+        self.assertEqual(papers[0]['pub_date'], date(2026, 11, 4))
+        self.assertIn('PRISM', papers[0]['date_kind'])
+
+    def test_rss_only_cover_date_is_not_online_publication(self):
+        feed = b'''<rss xmlns:prism="http://prismstandard.org/namespaces/basic/2.0/">
+          <channel><item><title>Undated article</title>
+          <prism:coverDate>2027-02-01</prism:coverDate></item></channel></rss>'''
+        papers = jd.fetch_rss(DummySession([DummyResponse(content=feed)]),
+                              'https://example.org/rss', 'J', 10)
+        self.assertEqual(papers, [])
+
+    def test_rss_failure_uses_crossref_and_reports_warning(self):
+        cfg = {'lookback_days': 7,
+               'journals': [{'name': 'IJRMMS', 'issn': '1365-1609',
+                             'rss': 'https://rss.sciencedirect.com/publication/science/13651609'}]}
+        paper = {'title': 'Fresh', 'doi': '10.1000/new',
+                 'url': 'https://doi.org/10.1000/new', 'authors': [],
+                 'pub_date': date(2026, 11, 5), 'date_kind': '在线发表',
+                 'journal': 'IJRMMS', 'source': 'Crossref'}
+        notes = []
+        with patch.object(jd, 'fetch_crossref', return_value=[paper]), \
+             patch.object(jd, 'fetch_rss', side_effect=requests.HTTPError('403')):
+            groups, keys, stats = jd.select_new(cfg, {'seen': {}},
+                                                DummySession([]), date(2026, 11, 6), notes)
+        self.assertEqual(len(groups['IJRMMS']), 1)
+        self.assertEqual(len(notes), 1)
+        self.assertIn('RSS 抓取失败', jd.render_markdown(groups, date(2026, 11, 6), 7, notes))
+        self.assertIn('RSS 抓取失败', jd.render_html(groups, date(2026, 11, 6), 7, notes))
+        self.assertEqual(groups['IJRMMS'][0]['first_seen'], date(2026, 11, 6))
 
     def test_selection_dedup_and_exclusion_of_old(self):
         def p(doi, title, dt, source='Crossref'):

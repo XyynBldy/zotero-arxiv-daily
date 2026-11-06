@@ -12,7 +12,7 @@ state/journals-seen.json
 tests/test_journal_digest.py
 ```
 
-按相同目录结构复制到现有 GitHub 仓库，提交到默认分支 `main`。仓库内已有 `config/`；新增此文件，不要覆盖原来的 `config/base.yaml`、`config/custom.yaml` 或 `main.yml`。
+以上文件已部署到仓库的 `main` 分支。仓库内已有 `config/`；新增此文件，不要覆盖原来的 `config/base.yaml`、`config/custom.yaml` 或 `main.yml`。
 
 ## 二、设置与原有 Actions 共用
 
@@ -30,7 +30,7 @@ tests/test_journal_digest.py
 
 编辑 `config/journal_digest.yaml` 的 `journals` 列表。默认从原来的配置移入三个 ISSN：
 
-- `1365-1609`：*International Journal of Rock Mechanics and Mining Sciences*
+- `1365-1609`：*International Journal of Rock Mechanics and Mining Sciences*（已配置官方 RSS：`https://rss.sciencedirect.com/publication/science/13651609`）
 - `0723-2632`：*Rock Mechanics and Rock Engineering*
 - `2095-2686`：*International Journal of Mining Science and Technology*
 
@@ -60,9 +60,9 @@ tests/test_journal_digest.py
 
 - Crossref 检索两个入口：**最近登记 DOI** 和 **最近在线发表**。
 - 每篇文章优先展示日期精确到日的 `published-online`；如缺失，使用其他完整日期；最后才使用 DOI 首次登记日，并明确标注，不把登记日期当成在线发表日期。
-- 只保留日期处于滑动窗口（默认 7 天）的文章，跨天记录已成功发送的 DOI 与标题摘要。初次部署可能一次发送过去 7 天的文章。
+- 只保留日期处于滑动窗口（默认 7 天）的文章，跨天记录已成功发送的 DOI 与标题摘要。RSS 的 `prism:coverDate` 是卷期封面日期，不能作为 Online First 日期；RSS `pubDate` 和 `updated` 也不等于 Online First。初次部署可能一次发送过去 7 天的文章。
 - 期刊出版商更新元数据可能有延迟、部分论文不提供可用的发表日期，程序无法保证囊括全部网站刚上架的论文。RSS 的 `updated` 也可能代表编辑更新而非首次发表，邮件会标为 RSS 发布/更新时间。
-- 现有实现对某个期刊的 API 错误或结果截断会让本次运行失败，以防误把不完整目录写成“0 篇”。
+- Crossref API 错误或结果截断仍会让本次运行失败；若 RSS 获取失败、但该期刊有 ISSN，继续使用 Crossref 补检，并在日报中显式警告覆盖不完整。
 
 ## 六、性能与可靠性
 
@@ -83,4 +83,4 @@ python -m unittest discover -s tests -v
 python scripts/journal_digest.py --config config/journal_digest.yaml --state state/journals-seen.json --report-dir reports/journals --dry-run
 ```
 
-该补丁只用于新 Workflow；**没有修改线上仓库的任何文件，也没有实际向你的邮箱发送邮件**。
+新 Workflow 已部署在 GitHub 仓库；此次 IJRMMS RSS 代码修改本身不发送邮件。

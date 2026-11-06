@@ -12,7 +12,7 @@ crossref:
 journals:
   - name: International Journal of Rock Mechanics and Mining Sciences
     issn: "1365-1609"
-    rss: ""  # 核实真实 RSS URL 后填入；保留 Crossref 作为兜底
+    rss: "https://rss.sciencedirect.com/publication/science/13651609"  # 用户提供的 IJRMMS 官方 RSS；Crossref 作补检
   - name: Rock Mechanics and Rock Engineering
     issn: "0723-2632"
     rss: ""

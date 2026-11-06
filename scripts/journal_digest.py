@@ -168,11 +168,13 @@ def local_name(tag: str) -> str:
 
 
 def first_node_text(entry: ET.Element, *names: str) -> str:
-    for child in entry:
-        if local_name(child.tag) in names:
-            text = "".join(child.itertext()).strip()
-            if text:
-                return clean(text)
+    # Preserve field priority. Publishers use several namespace versions.
+    for name in names:
+        for child in entry:
+            if local_name(child.tag) == name:
+                value = "".join(child.itertext()).strip()
+                if value:
+                    return clean(value)
     return ""
 
 
@@ -180,19 +182,30 @@ def parse_rss_date(value: str) -> date | None:
     if not value:
         return None
     try:
-        return parsedate_to_datetime(value).date()
+        parsed = parsedate_to_datetime(value)
+        if parsed.tzinfo is not None:
+            parsed = parsed.astimezone(timezone.utc)
+        return parsed.date()
     except (TypeError, ValueError, IndexError):
         pass
     try:
-        return date.fromisoformat(value[:10])
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        if parsed.tzinfo is not None:
+            parsed = parsed.astimezone(timezone.utc)
+        return parsed.date()
     except (TypeError, ValueError):
-        return None
-
+        try:
+            return date.fromisoformat(value[:10])
+        except (TypeError, ValueError):
+            return None
 
 def fetch_rss(session: requests.Session, url: str, name: str, timeout: int) -> list[dict]:
     if not safe_link(url):
         raise ValueError(f"{name}: invalid RSS URL (HTTP(S) required)")
-    response = session.get(url, timeout=timeout)
+    response = session.get(
+        url, timeout=timeout,
+        headers={"Accept": "application/rss+xml, application/atom+xml, application/xml, text/xml, */*"},
+    )
     response.raise_for_status()
     root = ET.fromstring(response.content)
     entries = [node for node in root.iter() if local_name(node.tag) in ("item", "entry")]
@@ -208,22 +221,36 @@ def fetch_rss(session: requests.Session, url: str, name: str, timeout: int) -> l
                 if child.attrib.get("rel") in (None, "alternate") and link:
                     break
         link = safe_link(link)
-        identifier = first_node_text(entry, "doi", "id", "guid")
+        identifier = first_node_text(entry, "doi", "identifier", "id", "guid")
         doi = normalize_doi(identifier) or normalize_doi(link)
-        stamp = first_node_text(entry, "published", "pubdate", "date", "updated")
-        when = parse_rss_date(stamp)
+        # PRISM coverDate is the issue's cover date, NOT Online First.
+        # RSS pubDate / Atom updated can indicate feed updates, not first publication.
+        candidates = (
+            ("publicationdate", "RSS PRISM 发表日期（未核实 Online First）"),
+            ("published", "Atom 发表日期（未核实 Online First）"),
+            ("pubdate", "RSS 条目发布日期（非 Online First 证明）"),
+            ("date", "RSS DC 日期（可能为更新日期）"),
+            ("updated", "Atom 更新时间（非发表日期）"),
+        )
+        when = None
+        kind = ""
+        for field, label in candidates:
+            when = parse_rss_date(first_node_text(entry, field))
+            if when is not None:
+                kind = label
+                break
         if when is None:
-            # 绝不把无日期 RSS 全部判成“今天发表”。
+            # Never infer Online First from an issue's cover date or today's fetch.
             continue
+        creator = first_node_text(entry, "creator", "author")
         papers.append(dict(title=title, doi=doi,
                            url=f"https://doi.org/{quote(doi, safe='/')}" if doi else link,
-                           authors=[], pub_date=when, date_kind="RSS 发布/更新日期",
+                           authors=[creator] if creator else [], pub_date=when, date_kind=kind,
                            journal=name, source="RSS"))
     return papers
 
-
 def select_new(cfg: dict, state: dict, session: requests.Session,
-               today: date) -> tuple[OrderedDict[str, list[dict]], set[str], dict[str, int]]:
+               today: date, warnings: list[str] | None = None) -> tuple[OrderedDict[str, list[dict]], set[str], dict[str, int]]:
     lookback = int(cfg.get("lookback_days", 7))
     if not 1 <= lookback <= 90:
         raise ValueError("lookback_days must be between 1 and 90")
@@ -249,7 +276,15 @@ def select_new(cfg: dict, state: dict, session: requests.Session,
         if issn:
             raw += fetch_crossref(session, cfg, issn, name, first_day, today)
         if rss:
-            raw += fetch_rss(session, rss, name, int(cfg.get("crossref", {}).get("timeout_seconds", 25)))
+            try:
+                raw += fetch_rss(session, rss, name, int(cfg.get("crossref", {}).get("timeout_seconds", 25)))
+            except (requests.RequestException, ET.ParseError, ValueError) as exc:
+                if not issn:
+                    raise RuntimeError(f"{name}: RSS failed and no Crossref backup") from exc
+                note = f"{name}：RSS 抓取失败（{type(exc).__name__}），本次仅使用 Crossref 补检；RSS 文章覆盖可能不完整。"
+                print("WARNING: " + note, file=sys.stderr, flush=True)
+                if warnings is not None:
+                    warnings.append(note)
         eligible: list[dict] = []
         local_keys: set[str] = set()
         for paper in raw:
@@ -259,6 +294,7 @@ def select_new(cfg: dict, state: dict, session: requests.Session,
             keys = paper_key(paper["doi"], paper["title"], name)
             if not keys or any(key in seen or key in batch_keys or key in local_keys for key in keys):
                 continue
+            paper["first_seen"] = today  # Detection date, not publisher online publication date.
             eligible.append(paper)
             local_keys.update(keys)
         eligible.sort(key=lambda p: (p["pub_date"], p["title"].casefold()), reverse=True)
@@ -270,12 +306,14 @@ def select_new(cfg: dict, state: dict, session: requests.Session,
 
 
 def render_markdown(groups: OrderedDict[str, list[dict]], today: date,
-                    lookback: int) -> str:
+                    lookback: int, warnings: list[str] | None = None) -> str:
     count = sum(map(len, groups.values()))
     chunks = [f"# 指定期刊最新文章日报 · {today.isoformat()} (UTC)",
               f"检索最近 {lookback} 天，按既有推送记录去重；本期新增 **{count}** 篇。",
-              "注：发表日期优先采用 Crossref 在线日期；缺失时使用其他记录日期。",
+              "注：仅 Crossref published-online 明确标为在线发表；RSS 日期可能是更新日期，绝不视为首次在线发表的证明。",
               ""]
+    if warnings:
+        chunks.extend(["## 数据源提示", *[f"- {warning}" for warning in warnings], ""])
     for name, papers in groups.items():
         chunks.append(f"## {name}（{len(papers)} 篇）")
         if not papers:
@@ -286,6 +324,7 @@ def render_markdown(groups: OrderedDict[str, list[dict]], today: date,
             link = p["url"] or ""
             chunks.append(f"{idx}. **{title}**")
             chunks.append(f"   - {p['date_kind']}：{p['pub_date'].isoformat()} | DOI：{p['doi'] or '未提供'} | 来源：{p['source']}")
+            chunks.append(f"   - 本监测系统首次发现：{p.get('first_seen', today).isoformat()}（非在线发表日期）")
             if p["authors"]:
                 chunks.append(f"   - 作者：{', '.join(p['authors'][:8])}" + (" 等" if len(p["authors"]) > 8 else ""))
             if link:
@@ -296,11 +335,15 @@ def render_markdown(groups: OrderedDict[str, list[dict]], today: date,
 
 
 def render_html(groups: OrderedDict[str, list[dict]], today: date,
-                lookback: int) -> str:
+                lookback: int, warnings: list[str] | None = None) -> str:
     total = sum(map(len, groups.values()))
     chunks = ["<html><body style='font-family:Arial,sans-serif;line-height:1.5;max-width:900px'>",
               f"<h2>指定期刊最新文章日报 · {html.escape(today.isoformat())} (UTC)</h2>",
               f"<p>最近 {lookback} 天检索并跨天去重，本期新增 <b>{total}</b> 篇。</p>"]
+    if warnings:
+        chunks.append("<h3>数据源提示</h3><ul>")
+        chunks.extend(f"<li>{html.escape(warning)}</li>" for warning in warnings)
+        chunks.append("</ul>")
     for name, papers in groups.items():
         chunks.append(f"<h3>{html.escape(name)}（{len(papers)} 篇）</h3>")
         if not papers:
@@ -317,6 +360,8 @@ def render_html(groups: OrderedDict[str, list[dict]], today: date,
                           html.escape(p["date_kind"]) + ": " + p["pub_date"].isoformat() +
                           " | DOI: " + html.escape(p["doi"] or "未提供") +
                           " | " + html.escape(p["source"]) + "</div>" +
+                          "<div style='font-size:12px;color:#777'>本系统首次发现：" +
+                          p.get("first_seen", today).isoformat() + "（不是在线发表日期）</div>" +
                           ("<div style='font-size:13px'>" + html.escape(authors) + "</div>" if authors else "") +
                           "</li>")
         chunks.append("</ol>")
@@ -384,11 +429,12 @@ def main(argv: list[str] | None = None) -> int:
     state = json.loads(state_path.read_text(encoding="utf-8")) if state_path.exists() else {"schema": 1, "seen": {}}
     if not isinstance(state.get("seen"), dict):
         raise ValueError("Invalid seen state")
-    groups, keys, stats = select_new(config, state, make_session(), today)
+    warnings: list[str] = []
+    groups, keys, stats = select_new(config, state, make_session(), today, warnings)
     total = sum(len(papers) for papers in groups.values())
     report_dir = Path(args.report_dir)
     report_dir.mkdir(parents=True, exist_ok=True)
-    report = render_markdown(groups, today, int(config.get("lookback_days", 7)))
+    report = render_markdown(groups, today, int(config.get("lookback_days", 7)), warnings)
     report_path = report_dir / f"{today.isoformat()}.md"
     report_path.write_text(report, encoding="utf-8")
     print(f"Report: {report_path} | Newly discovered: {total} | raw counts: {stats} | dry_run={dry_run}", flush=True)
@@ -398,13 +444,15 @@ def main(argv: list[str] | None = None) -> int:
             fp.write(f"### Journal digest: {today.isoformat()} UTC\n\n")
             fp.write(f"- New: **{total}**; dry run: **{dry_run}**\n")
             fp.write("\n".join(f"- {name}: {len(papers)}" for name, papers in groups.items()) + "\n")
+            if warnings:
+                fp.write("\n".join(f"- ⚠️ {warning}" for warning in warnings) + "\n")
     if dry_run:
         return 0
     if not total and not bool(config.get("send_when_empty", False)):
         print("No new papers; email skipped.")
         return 0
     subject = f"[期刊日报] {today.isoformat()} | 新文章 {total} 篇"
-    send_email(subject, report, render_html(groups, today, int(config.get("lookback_days", 7))))
+    send_email(subject, report, render_html(groups, today, int(config.get("lookback_days", 7)), warnings))
     # State is modified only after successful mail submission (SMTP acceptance).
     state["seen"].update({key: today.isoformat() for key in keys})
     state_path.parent.mkdir(parents=True, exist_ok=True)
