@@ -1,5 +1,6 @@
 # 独立于原来的 Zotero/arXiv 推荐邮件；期刊增量目录不执行全文下载或 AI 评分。
-# 以 UTC 计算检索范围；时间窗用于容忍出版商元数据延迟，是否已推送由 state 文件判断。
+# 近期在线发表窗口按 UTC 计算（含今日）；采用精确 published-online 或官方 Available online。
+# 延迟登记及在线日期待核实的记录单列；成功扫描后保存进度，按索引日期补抓。
 lookback_days: 7
 send_when_empty: false
 crossref:

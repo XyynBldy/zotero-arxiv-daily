@@ -58,11 +58,13 @@ tests/test_journal_digest.py
 
 ## 五、如何定义“最新”
 
-- Crossref 检索两个入口：**最近登记 DOI** 和 **最近在线发表**。
+- Crossref 检索 **最近登记 DOI**、**最近在线发表**；已有成功抓取进度后，再按 **索引日期** 补抓新入库及更新记录。索引补抓从上次成功扫描日期前一天开始，失败多日后也不会只查询最近 7 天。
 - 每篇文章优先展示日期精确到日的 `published-online`；如缺失，使用其他完整日期；最后才使用 DOI 首次登记日，并明确标注，不把登记日期当成在线发表日期。
-- 只保留日期处于滑动窗口（默认 7 天）的文章，跨天记录已成功发送的 DOI 与标题摘要。RSS 的 `prism:coverDate` 是卷期封面日期，不能作为 Online First 日期；RSS `pubDate` 和 `updated` 也不等于 Online First。初次部署可能一次发送过去 7 天的文章。
+- 日报分为 **近期在线发表（日期已核实）**、**补录 / 元数据更新（非近期在线发表）**、**新发现记录（在线发表日期待核实）**。近期窗口默认 7 个 UTC 日（含今日），仅精确到日且不晚于今天的 `published-online`，或官方 ScienceDirect RSS 明确写出的 `Publication date: Available online 日 月 年`，能进入第一组，按该日期从新到旧排序；每篇附日期依据。
+- 新登记 / 新索引的记录即使发表时间较早也会列为补录，不伪装成近期论文。缺少在线日期、仅有未来卷期日期的记录列为待核实；明确的未来在线日期暂不推送，也不标记为已发送，留待日期到来后检索。RSS 的 `prism:coverDate`、`pubDate` 和 `updated` 均不能证明 Online First；同一 DOI 的官方 RSS 与 Crossref 在线日期不一致时，降为待核实并提示冲突。无 DOI 的 RSS 仅在与一篇 Crossref 记录标题完全匹配时合并日期信息。
+- 日报及 Actions 摘要显示每本期刊 **本次检索可核实的最新在线发表日期**，Markdown 报告还记录抓取完成时间。这表示本次公开元数据的检查结果，不表示出版商已经完整更新，也不把抓取时间当成发表时间。
 - 期刊出版商更新元数据可能有延迟、部分论文不提供可用的发表日期，程序无法保证囊括全部网站刚上架的论文。RSS 的 `updated` 也可能代表编辑更新而非首次发表，邮件会标为 RSS 发布/更新时间。
-- Crossref API 错误或结果截断仍会让本次运行失败；若 RSS 获取失败、但该期刊有 ISSN，继续使用 Crossref 补检，并在日报中显式警告覆盖不完整。
+- Crossref API 错误或结果截断仍会让本次运行失败；若 RSS 获取失败、但该期刊有 ISSN，继续使用 Crossref 补检，并在日报中显式警告覆盖不完整。即使零篇也发送异常提示，且不推进成功抓取日期。正常零篇的扫描会保存抓取进度；SMTP 失败时不更新任何发送 / 抓取状态；dry run 始终不修改状态。
 
 ## 六、性能与可靠性
 
@@ -74,7 +76,7 @@ tests/test_journal_digest.py
 
 ```bash
 python -m pip install requests PyYAML
-python -m unittest discover -s tests -v
+python -m unittest discover -s tests -p 'test_journal_digest*.py' -v
 ```
 
 也可在本地 `--dry-run` 执行，但必须有联网环境才能真正访问 Crossref 和 RSS：
