@@ -12,6 +12,8 @@ def test_journal_records_reach_ranking_and_email(config, monkeypatch):
     config.source.journals.issns = ["1365-1609", "0723-2632"]
     retriever = get_retriever_cls("journals")(config)
     first = {"DOI": "10.1234/a", "title": ["Pillar collapse"], "container-title": ["Journal A"]}
+    today = datetime.now().date()
+    first["published-online"] = {"date-parts": [[today.year, today.month, today.day]]}
     second = dict(first, DOI="10.1234/b", abstract="<p>Rock strength.</p>")
     monkeypatch.setattr(retriever, "_get_json", lambda params: {"message": {"items": [first, second]}})
     monkeypatch.setattr("zotero_arxiv_daily.retriever.base.sleep", lambda _: None)

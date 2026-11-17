@@ -10,6 +10,7 @@ from zotero_arxiv_daily.construct_email import render_email
 from zotero_arxiv_daily.protocol import CorpusPaper, Paper
 from zotero_arxiv_daily.retriever.journal_retriever import JournalRetriever
 from tests.canned_responses import make_sample_paper
+from tests.date_verification_helpers import proof_for
 
 
 def test_journal_policy_overrides_a_legacy_mixed_source_config(config, monkeypatch):
@@ -79,10 +80,10 @@ def test_future_online_dates_are_excluded_and_future_issue_dates_are_unverified(
                article("10.1234/backfill", [2026, 10, 1], [2026, 11, 17])]
     retriever, _ = setup_retriever(config, monkeypatch, tmp_path, records)
     result = retriever._retrieve_raw_papers()
-    assert {r["DOI"] for r in result} == {"10.1234/issue", "10.1234/backfill"}
+    assert {r["DOI"] for r in result} == {"10.1234/backfill"}
     papers = [retriever.convert_to_paper(r) for r in result]
-    assert papers[0].online_date is None and papers[0].freshness == "unverified"
-    assert papers[1].online_date == "2026-10-01" and papers[1].freshness == "late_record"
+    assert papers[0].online_date == "2026-10-01" and papers[0].freshness == "late_record"
+    assert "10.1234/issue" in retriever._state["pending_date_checks"]
 
 
 def test_recovery_uses_saved_progress_and_marks_only_delivered_dois(config, monkeypatch, tmp_path):
@@ -159,7 +160,9 @@ def executor_for_delivery(config, events, papers):
 
 
 def test_delivery_state_is_written_only_after_successful_smtp(config, monkeypatch):
-    paper = make_sample_paper(source="journals", abstract="", full_text=None)
+    paper = make_sample_paper(source="journals", abstract="", full_text=None,
+                              doi="10.1234/a", online_date="2026-11-17",
+                              date_verification=proof_for("10.1234/a", "2026-11-17"))
     events = []
     executor = executor_for_delivery(config, events, [paper])
     monkeypatch.setattr("zotero_arxiv_daily.executor.send_email", lambda *args: events.append(("sent", None)))
@@ -176,7 +179,8 @@ def test_delivery_state_is_written_only_after_successful_smtp(config, monkeypatc
 def test_recent_online_paper_is_selected_before_higher_scoring_old_backfill(config, monkeypatch):
     config.executor.max_paper_num = 1
     recent = make_sample_paper(source="journals", abstract="", full_text=None,
-                              online_date="2026-11-17", freshness="recent_online", score=1)
+                              online_date="2026-11-17", freshness="recent_online", score=1,
+                              doi="10.1234/recent", date_verification=proof_for("10.1234/recent", "2026-11-17"))
     old = make_sample_paper(source="journals", abstract="", full_text=None,
                            online_date="2025-01-01", freshness="late_record", score=9)
     events = []

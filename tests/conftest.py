@@ -51,9 +51,22 @@ def _base_config():
 
 
 @pytest.fixture()
-def config(_base_config):
+def config(_base_config, tmp_path):
     """Function-scoped deep copy of the session config.
 
     Safe to mutate inside any test without polluting other tests.
     """
-    return copy.deepcopy(_base_config)
+    cfg = copy.deepcopy(_base_config)
+    cfg.source.journals.state_path = str(tmp_path / "journal-recommendations.json")
+    return cfg
+
+
+@pytest.fixture(autouse=True)
+def _legacy_pipeline_publisher_stubs(request, monkeypatch):
+    """Legacy pipeline cases stay offline; verifier tests use actual parser + fake HTTP."""
+    if Path(request.module.__file__).name in {
+        "test_journal_recommendation_policy.py", "test_journal_retriever.py",
+    }:
+        from tests.date_verification_helpers import offline_verify
+        from zotero_arxiv_daily.publication_verifier import PublisherDateVerifier
+        monkeypatch.setattr(PublisherDateVerifier, "verify", offline_verify)

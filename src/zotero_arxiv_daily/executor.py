@@ -11,6 +11,7 @@ from .construct_email import render_email
 from .utils import send_email
 from openai import OpenAI
 from tqdm import tqdm
+from .publication_verifier import assert_verified
 
 
 def normalize_path_patterns(patterns: list[str] | ListConfig | None, config_key: str) -> list[str] | None:
@@ -127,6 +128,9 @@ class Executor:
             self._mark_delivered([])
             return
         logger.info("Sending email...")
+        for paper in reranked_papers:
+            if paper.source == "journals":
+                assert_verified(paper.date_verification, paper.doi, paper.online_date)
         email_content = render_email(reranked_papers)
         send_email(self.config, email_content)
         self._mark_delivered(reranked_papers)

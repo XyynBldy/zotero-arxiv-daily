@@ -144,6 +144,8 @@ def render_email(papers:list[Paper]) -> str:
                                escape(p.publication_date) + "（不作为最新在线发表依据）")
         if p.freshness:
             details.append("日期状态：" + escape(FRESHNESS_LABELS.get(p.freshness, "待核实")))
+        if p.date_verification:
+            details.append("官网核查时间：" + escape(p.date_verification.get("checked_at", "未记录")))
         metadata_html = '<div style="font-size:13px;font-weight:normal;color:#555;margin-top:8px">' + '<br>'.join(details) + '</div>'
         summary_label = {"generated": "AI 摘要", "abstract_fallback": "原文摘要（AI 生成失败）",
                          "unavailable": "摘要未提供", "original_abstract": "原文摘要（未请求 AI）"}.get(p.tldr_status, "摘要（生成状态未记录）")

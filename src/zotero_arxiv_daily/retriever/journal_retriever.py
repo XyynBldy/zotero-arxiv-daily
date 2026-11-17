@@ -9,6 +9,7 @@ from .base import register_retriever
 from .crossref_base import CrossrefBase
 from ..journal_dates import classify_freshness, crossref_dates
 from ..protocol import Paper
+from ..publication_verifier import PublisherDateVerifier, assert_verified, json_state
 
 
 @register_retriever("journals")
@@ -38,12 +39,16 @@ class JournalRetriever(CrossrefBase):
         queries = [("created-date", start), ("online-pub-date", start)]
         if indexed_since is not None:
             queries.append(("index-date", indexed_since))
-        records = {}
+        subscribed = set(map(str, issns))
+        records = {doi: dict(item, _recent_metadata=True)
+                   for doi, item in self._state.get("pending_date_checks", {}).items()
+                   if item.get("_subscribed_issn") in subscribed}
+        verifier = PublisherDateVerifier()
         for issn in issns:
             for field, lower in queries:
                 params = {
                     "filter": f"type:journal-article,issn:{issn},from-{field}:{lower},until-{field}:{end}",
-                    "select": "DOI,title,abstract,author,container-title,created,indexed,published-online,published,issued",
+                    "select": "DOI,title,abstract,author,container-title,created,indexed,published-online,published,issued,resource",
                     "rows": 100, "cursor": "*",
                 }
                 count = 0
@@ -58,6 +63,7 @@ class JournalRetriever(CrossrefBase):
                         if not doi:
                             continue
                         item = dict(item)
+                        item["_subscribed_issn"] = str(issn)
                         item["_recent_metadata"] = (field != "online-pub-date" or
                                                     records.get(doi, {}).get("_recent_metadata", False))
                         records[doi] = item
@@ -70,9 +76,21 @@ class JournalRetriever(CrossrefBase):
                 else:
                     raise RuntimeError(f"Crossref {issn}: pagination exceeded 100 pages")
                 logger.info(f"Crossref {issn} | {field} | {lower} to {end} UTC | {count} records")
-        result = []
-        for doi, item in records.items():
+        result, pending = [], {}
+        audit = self._state.setdefault("date_verification_audit", {})
+        for doi, item in sorted(records.items(), key=lambda pair: audit.get(pair[0], {}).get("last_attempted_at", "")):
             dates = crossref_dates(item)
+            publisher_url = (item.get("resource") or {}).get("primary", {}).get("URL")
+            proof = verifier.verify(doi, publisher_url, dates["online_date"], end)
+            proof["last_attempted_at"] = (proof["checked_at"] if proof.get("attempted") else
+                                         audit.get(doi, {}).get("last_attempted_at", ""))
+            audit[doi] = proof
+            try:
+                assert_verified(proof, doi, proof.get("online_date"), end)
+            except ValueError:
+                pending[doi] = item
+                continue
+            dates["online_date"] = datetime.strptime(proof["online_date"], "%Y-%m-%d").date()
             dates["matched_recent_metadata"] = item["_recent_metadata"]
             freshness = classify_freshness(dates, start, end, indexed_since)
             if freshness is None:
@@ -83,7 +101,13 @@ class JournalRetriever(CrossrefBase):
             if sent and not newly_online:
                 continue
             item["_freshness"] = freshness
+            item["_date_verification"] = proof
+            pending[doi] = item  # Retain until SMTP acceptance, including items beyond top K.
             result.append(item)
+        self._state["pending_date_checks"] = pending
+        held = sum(audit.get(doi, {}).get("status") != "verified" for doi in pending)
+        logger.info(f"Publisher date verification: {len(result)} eligible; {held} held for recheck")
+        self._save_state()
         return result[:10] if self.config.executor.debug else result
 
     def convert_to_paper(self, item):
@@ -97,6 +121,12 @@ class JournalRetriever(CrossrefBase):
             if affiliation.get("name")
         ))
         dates = crossref_dates(item)
+        proof = item.get("_date_verification") or {}
+        if proof.get("status") == "verified":
+            dates["online_date"] = datetime.strptime(proof["online_date"], "%Y-%m-%d").date()
+            dates["pub_date"] = dates["online_date"]
+            dates["date_kind"] = "官网核实的在线发表日期"
+            dates["online_date_source"] = proof["publisher_url"] + " · " + proof["date_label"]
         return Paper(
             source=self.name,
             journal=next(iter(item.get("container-title") or []), "期刊名未提供（按订阅 ISSN 检索）"),
@@ -110,15 +140,24 @@ class JournalRetriever(CrossrefBase):
             publication_date=dates["pub_date"].isoformat() if dates["pub_date"] else None,
             publication_date_kind=dates["date_kind"], publication_date_source=dates["online_date_source"],
             freshness=item.get("_freshness", "unverified"),
+            date_verification=proof or None,
         )
 
     def mark_delivered(self, papers):
         if self.config.executor.debug or not hasattr(self, "_state"):
             return
-        self._state["seen"].update({p.doi: self._scan_date.isoformat() for p in papers
-                                    if p.source == self.name and p.doi})
+        for paper in papers:
+            if paper.source == self.name and paper.doi:
+                assert_verified(paper.date_verification, paper.doi, paper.online_date, self._scan_date)
+                self._state["seen"][paper.doi] = self._scan_date.isoformat()
+                self._state.get("pending_date_checks", {}).pop(paper.doi, None)
         self._state["last_successful_fetch"] = self._scan_date.isoformat()
+        self._save_state()
+
+    def _save_state(self):
+        if self.config.executor.debug:
+            return
         self._state_path.parent.mkdir(parents=True, exist_ok=True)
         temp = self._state_path.with_suffix(".tmp")
-        temp.write_text(json.dumps(self._state, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        temp.write_text(json_state(self._state), encoding="utf-8")
         temp.replace(self._state_path)

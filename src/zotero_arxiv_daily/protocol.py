@@ -56,6 +56,7 @@ class Paper:
     publication_date_source: Optional[str] = None
     freshness: Optional[str] = None
     tldr_status: Optional[str] = None
+    date_verification: Optional[dict] = None
 
     def _generate_tldr_with_llm(self, openai_client:OpenAI,llm_params:dict) -> str:
         lang = llm_params.get('language', 'English')

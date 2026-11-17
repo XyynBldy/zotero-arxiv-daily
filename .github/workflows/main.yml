@@ -40,6 +40,7 @@ jobs:
           uv run src/zotero_arxiv_daily/main.py executor.journals_only=true 'executor.source=[journals]'
 
       - name: Persist journal recommendation delivery state
+        if: always()
         run: |
           state_file=state/recommendation-journals.json
           if [ ! -f "$state_file" ]; then

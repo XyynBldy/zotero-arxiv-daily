@@ -29,6 +29,12 @@ def record(suffix, online=None, created=None, published=None, indexed=None):
 class FreshnessTests(unittest.TestCase):
     cfg = {"lookback_days": 7, "journals": [{"name": "J", "issn": "1365-1609"}]}
 
+    def setUp(self):
+        from tests.date_verification_helpers import offline_verify
+        stub = patch.object(jd.PublisherDateVerifier, 'verify', offline_verify)
+        stub.start()
+        self.addCleanup(stub.stop)
+
     def select(self, papers, state=None, rss=None, status=None):
         cfg = dict(self.cfg)
         if rss is not None:
@@ -57,9 +63,9 @@ class FreshnessTests(unittest.TestCase):
     def test_future_issue_date_is_unverified_and_never_recent_online(self):
         paper = record("issue", created=[2026, 11, 16], published=[2027, 1, 1])
         groups, _ = self.select([paper])
-        self.assertEqual(groups["J"][0]["freshness"], "unverified")
+        self.assertEqual(groups["J"], [])
         text = jd.render_markdown(groups, TODAY, 7)
-        self.assertIn("未来日期，不作为近期发表依据", text)
+        self.assertNotIn("2027-01-01", text)
         self.assertNotIn("### 近期在线发表", text)
 
     def test_future_online_date_is_not_sent_or_marked_seen(self):
@@ -72,7 +78,7 @@ class FreshnessTests(unittest.TestCase):
         paper = record("partial", [2026, 11], [2026, 11, 16])
         groups, _ = self.select([paper])
         self.assertIsNone(paper["online_date"])
-        self.assertEqual(groups["J"][0]["freshness"], "unverified")
+        self.assertEqual(groups["J"], [])
 
     def test_seven_day_window_includes_today_and_six_previous_days(self):
         groups, _ = self.select([record("included", [2026, 11, 10]),
@@ -121,9 +127,8 @@ class FreshnessTests(unittest.TestCase):
         notes = []
         with patch.object(jd, "fetch_crossref", return_value=[crossref]), patch.object(jd, "fetch_rss", return_value=[rss]):
             groups, _, _ = jd.select_new(cfg, {"seen": {}}, None, TODAY, notes)
-        self.assertEqual(groups["J"][0]["freshness"], "unverified")
-        self.assertIsNone(groups["J"][0]["online_date"])
-        self.assertIn("不一致", notes[0])
+        self.assertEqual(groups["J"], [])
+        self.assertIn("冲突", notes[0])
 
     def test_future_rss_update_is_not_reported_as_recent(self):
         paper = dict(record("rss"), source="RSS", pub_date=date(2026, 11, 17),
@@ -212,13 +217,16 @@ class FreshnessTests(unittest.TestCase):
     def test_smtp_failure_preserves_seen_records_and_fetch_progress(self):
         after, before, _ = self.run_main([record("fresh", [2026, 11, 16])],
                                         RuntimeError("SMTP unavailable"))
-        self.assertEqual(after, before)
+        self.assertEqual(after['seen'], before['seen'])
+        self.assertEqual(after['last_successful_fetch'], before['last_successful_fetch'])
+        self.assertIn('10.1234/fresh', after['pending_date_checks'])
 
     def test_zero_papers_with_failed_rss_sends_warning_and_preserves_progress(self):
         after, before, mail = self.run_main([], rss_error=True)
         mail.assert_called_once()
         self.assertIn("数据源异常", mail.call_args.args[0])
-        self.assertEqual(after, before)
+        self.assertEqual(after['seen'], before['seen'])
+        self.assertEqual(after['last_successful_fetch'], before['last_successful_fetch'])
 
     def test_reports_separate_latest_backfill_and_unverified_records(self):
         groups, _ = self.select([record("latest", [2026, 11, 16]),
@@ -227,7 +235,8 @@ class FreshnessTests(unittest.TestCase):
         for render in (jd.render_markdown, jd.render_html):
             report = render(groups, TODAY, 7, source_status={"J": "2026-11-16"})
             self.assertLess(report.index("近期在线发表（日期已核实）"), report.index("补录 / 元数据更新"))
-            self.assertLess(report.index("补录 / 元数据更新"), report.index("新发现记录（在线发表日期待核实）"))
+            self.assertNotIn("新发现记录（在线发表日期待核实）", report)
+            self.assertNotIn("**unknown**", report)
             self.assertIn("本次检索可核实的最新在线发表日期：2026-11-16", report)
 
 

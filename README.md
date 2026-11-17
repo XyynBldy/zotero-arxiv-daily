@@ -25,7 +25,7 @@
 > [!IMPORTANT]
 > Please keep an eye on this repo, and merge your forked repo in time when there is any update of this upstream, in order to enjoy new features and fix found bugs.
 
-> **本分支的当前部署策略：仅推送已订阅期刊。** 定时推荐使用 `source.journals.issns` 的 ISSN 白名单；`executor.journals_only=true` 会忽略旧 `CUSTOM_CONFIG` 中混入的 arXiv 等来源。邮件显示期刊名、在线发表日期及日期依据；未知日期标为待核实，AI 失败时明确展示原文摘要。独立期刊目录日报使用 `config/journal_digest.yaml` 的订阅列表，两条流程分别去重。
+> **本分支的当前部署策略：仅推送已订阅且官网在线日期核实通过的期刊论文。** 定时推荐使用 `source.journals.issns` 的 ISSN 白名单；`executor.journals_only=true` 会忽略旧 `CUSTOM_CONFIG` 中混入的 arXiv 等来源。推送前必须匹配出版商文章页 DOI、提取明确在线日期、检查来源冲突并保留核查凭据；未知日期、官网受限及冲突记录暂缓并自动复查。邮件显示日期依据和核查时间，AI 失败时明确展示原文摘要。独立期刊目录日报使用 `config/journal_digest.yaml` 的订阅列表，两条流程分别去重。
 
 ## 🧐 About <a name = "about"></a>
 

@@ -1,6 +1,6 @@
 # 独立于原来的 Zotero/arXiv 推荐邮件；期刊增量目录不执行全文下载或 AI 评分。
-# 近期在线发表窗口按 UTC 计算（含今日）；采用精确 published-online 或官方 Available online。
-# 延迟登记及在线日期待核实的记录单列；成功扫描后保存进度，按索引日期补抓。
+# 近期在线发表窗口按 UTC 计算（含今日）；推送前必须在出版商文章页核对 DOI 和明确在线日期。
+# Crossref / RSS 仅作发现及交叉检查；未核实条目留在 pending_date_checks，后续继续复查。
 lookback_days: 7
 send_when_empty: false
 crossref:

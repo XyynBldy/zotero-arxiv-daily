@@ -35,6 +35,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from zotero_arxiv_daily.journal_dates import (  # noqa: E402
     FRESHNESS_LABELS, classify_freshness, crossref_date, crossref_dates,
 )
+from zotero_arxiv_daily.publication_verifier import (  # noqa: E402
+    PublisherDateVerifier, assert_verified, json_state, restore_dates,
+)
 
 CROSSREF_API = "https://api.crossref.org/journals/{issn}/works"
 DOI_RE = re.compile(r"10\.\d{4,9}/[^\s\"<>]+", re.I)
@@ -84,7 +87,8 @@ def make_crossref_paper(item: dict, journal_name: str) -> dict | None:
     authors = [a for a in authors if a]
     return dict(title=title, doi=doi, url=f"https://doi.org/{quote(doi, safe='/')}",
                 authors=authors, **dates,
-                journal=journal_name, source="Crossref")
+                journal=journal_name, source="Crossref",
+                publisher_url=(item.get("resource") or {}).get("primary", {}).get("URL"))
 
 
 def make_session() -> requests.Session:
@@ -116,7 +120,7 @@ def fetch_crossref(session: requests.Session, cfg: dict, issn: str, name: str,
     for field, lower in queries:
         params = {
             "filter": f"type:journal-article,from-{field}:{lower.isoformat()},until-{field}:{last_day.isoformat()}",
-            "select": "DOI,title,author,created,indexed,published-online,published,issued,container-title",
+            "select": "DOI,title,author,created,indexed,published-online,published,issued,container-title,resource",
             "rows": rows,
             "cursor": "*",
         }
@@ -278,11 +282,15 @@ def select_new(cfg: dict, state: dict, session: requests.Session,
     if not cfg.get("journals"):
         raise ValueError("Configure one or more journals")
     seen = state.get("seen", {})
+    old_pending = state.get("pending_date_checks", {})
+    pending = {}
+    audit = state.setdefault("date_verification_audit", {})
     additions: set[str] = set()
     result: OrderedDict[str, list[dict]] = OrderedDict()
     stats: dict[str, int] = {}
     batch_keys: set[str] = set()
     for journal in cfg["journals"]:
+        verifier = PublisherDateVerifier(max_checks=8)
         name = clean(journal.get("name", ""))
         issn = str(journal.get("issn") or "").strip()
         rss = str(journal.get("rss") or "").strip()
@@ -305,6 +313,11 @@ def select_new(cfg: dict, state: dict, session: requests.Session,
                 print("WARNING: " + note, file=sys.stderr, flush=True)
                 if warnings is not None:
                     warnings.append(note)
+        fresh_keys = {p["doi"] or p["title"].casefold() for p in raw}
+        for item in old_pending.values():
+            if (item.get("journal") == name and item.get("subscription_issn") == issn and
+                    (item["doi"] or item["title"].casefold()) not in fresh_keys):
+                raw.append(dict(restore_dates(item), matched_recent_metadata=True))
         # Crossref has the authoritative online date; an RSS update for the same
         # DOI must not replace it or make an old paper appear newly published.
         by_doi = {p["doi"]: p for p in raw if p["doi"] and p["source"] == "Crossref"}
@@ -325,30 +338,51 @@ def select_new(cfg: dict, state: dict, session: requests.Session,
             target["rss_date"] = paper.get("rss_date", paper.get("pub_date"))
             if paper.get("online_date"):
                 if target.get("online_date") and target["online_date"] != paper["online_date"]:
-                    note = (f"{name}：{target['doi']} 的 Crossref 在线日期 {target['online_date']} 与官方 RSS "
-                            f"{paper['online_date']} 不一致，已降为日期待核实。")
                     if warnings is not None:
-                        warnings.append(note)
+                        warnings.append(f"{name}：存在来源日期冲突，相关记录已暂缓推送，详见核查报告。")
+                    target["date_conflict"] = True
                     target["online_date"] = None
                     target["date_kind"] = "来源日期冲突（需人工核实）"
                 else:
                     target["online_date"] = paper["online_date"]
                     target["pub_date"] = paper["online_date"]
                     target["date_kind"] = paper["date_kind"]
-                    target["online_date_source"] = paper["online_date_source"]
+                    target["online_date_source"] = paper.get("online_date_source", "官方 RSS 明确在线日期（尚待官网复核）")
             merged_rss.add(id(paper))
         raw = [p for p in raw if id(p) not in merged_rss]
-        if source_status is not None:
-            online_dates = [p["online_date"] for p in raw if p.get("online_date") and p["online_date"] <= today]
-            source_status[name] = max(online_dates).isoformat() if online_dates else "未取得可核实的在线发表日期"
+        verified_dates = []
         eligible: list[dict] = []
         local_keys: set[str] = set()
-        for paper in raw:
+        def last_attempt(paper):
+            key = paper["doi"] or "title:" + hashlib.sha256((name + paper["title"]).encode()).hexdigest()
+            return audit.get(key, {}).get("last_attempted_at", "")
+        for paper in sorted(raw, key=last_attempt):
+            queue_key = paper["doi"] or "title:" + hashlib.sha256((name + paper["title"]).encode()).hexdigest()
+            paper["subscription_issn"] = issn
+            paper.setdefault("first_seen", today)
+            proof = verifier.verify(paper["doi"], paper.get("publisher_url") or paper.get("url"),
+                                    paper.get("online_date"), today)
+            if paper.get("date_conflict"):
+                proof = dict(proof, status="conflict", reason="Crossref 与官方 RSS 日期存在冲突")
+            proof["last_attempted_at"] = (proof["checked_at"] if proof.get("attempted") else
+                                           audit.get(queue_key, {}).get("last_attempted_at", ""))
+            audit[queue_key] = proof
+            try:
+                assert_verified(proof, paper["doi"], proof.get("online_date"), today)
+            except ValueError:
+                pending[queue_key] = paper
+                continue
+            paper["date_verification"] = proof
+            paper["online_date"] = date.fromisoformat(proof["online_date"])
+            paper["pub_date"] = paper["online_date"]
+            paper["date_kind"] = "官网核实的在线发表日期"
+            paper["online_date_source"] = proof["publisher_url"] + " · " + proof["date_label"]
+            verified_dates.append(paper["online_date"])
             freshness = classify_freshness(paper, first_day, today, indexed_since)
             if freshness is None:
                 continue
             paper["freshness"] = freshness
-            keys = paper_key(paper["doi"], paper["title"], name)
+            keys = {"doi:" + paper["doi"]}  # Strict DOI identity; homonymous papers remain distinct.
             doi_key = "doi:" + paper["doi"]
             # A previously unverified / advance issue record may become Online
             # First after it was sent. Announce that new publication date once.
@@ -357,8 +391,8 @@ def select_new(cfg: dict, state: dict, session: requests.Session,
             if (not keys or any(key in batch_keys or key in local_keys for key in keys) or
                     (not newly_online and any(key in seen for key in keys))):
                 continue
-            paper["first_seen"] = today  # Detection date, not publisher online publication date.
             eligible.append(paper)
+            pending[queue_key] = paper
             local_keys.update(keys)
         def sort_date(paper):
             if paper.get("online_date"):
@@ -371,6 +405,9 @@ def select_new(cfg: dict, state: dict, session: requests.Session,
         additions.update(local_keys)
         batch_keys.update(local_keys)
         stats[name] = len(raw)
+        if source_status is not None:
+            source_status[name] = max(verified_dates).isoformat() if verified_dates else "本次没有通过官网核查的在线日期"
+    state["pending_date_checks"] = pending
     return result, additions, stats
 
 
@@ -379,8 +416,8 @@ def render_markdown(groups: OrderedDict[str, list[dict]], today: date,
                     source_status: dict | None = None) -> str:
     count = sum(map(len, groups.values()))
     chunks = [f"# 指定期刊最新文章日报 · {today.isoformat()} (UTC)",
-              f"近期在线发表窗口：最近 {lookback} 个 UTC 日（含今日）；本期新发现 / 补录 **{count}** 篇。",
-              "在线日期依据：精确到日的 Crossref published-online 或官方 ScienceDirect RSS 明确的 Available online；补录和待核实记录单列。",
+              f"近期在线发表窗口：最近 {lookback} 个 UTC 日（含今日）；本期通过官网日期核实 **{count}** 篇。",
+              "仅推送已在出版商文章页核对 DOI 和明确在线日期的记录；未核实及日期冲突的记录留待复查。",
               ""]
     if warnings:
         chunks.extend(["## 数据源提示", *[f"- {warning}" for warning in warnings], ""])
@@ -419,7 +456,9 @@ def publication_sections(papers: list[dict]):
 
 def date_description(paper: dict, today: date) -> str:
     if paper.get("online_date"):
-        return "在线发表：" + paper["online_date"].isoformat() + "；日期依据：" + paper.get("online_date_source", "Crossref published-online")
+        proof = paper.get("date_verification") or {}
+        return ("在线发表：" + paper["online_date"].isoformat() + "；日期依据：" +
+                paper.get("online_date_source", "来源未提供") + "；官网核查时间：" + proof.get("checked_at", "未记录"))
     value = paper.get("pub_date")
     detail = f"{paper['date_kind']}：{value.isoformat()}" if value else "无可用的精确发表日期"
     if value and value > today:
@@ -433,8 +472,8 @@ def render_html(groups: OrderedDict[str, list[dict]], today: date,
     total = sum(map(len, groups.values()))
     chunks = ["<html><body style='font-family:Arial,sans-serif;line-height:1.5;max-width:900px'>",
               f"<h2>指定期刊最新文章日报 · {html.escape(today.isoformat())} (UTC)</h2>",
-              f"<p>近期在线发表窗口：最近 {lookback} 个 UTC 日（含今日）；新发现 / 补录 <b>{total}</b> 篇。</p>",
-              "<p>仅 Crossref published-online 或官方 RSS 明确的 Available online 用于核实在线日期；补录及待核实记录单列。</p>"]
+              f"<p>近期在线发表窗口：最近 {lookback} 个 UTC 日（含今日）；通过官网日期核实 <b>{total}</b> 篇。</p>",
+              "<p>仅推送官网文章 DOI 与明确在线日期均核实通过的记录；其余暂缓并留待复查。</p>"]
     if warnings:
         chunks.append("<h3>数据源提示</h3><ul>")
         chunks.extend(f"<li>{html.escape(warning)}</li>" for warning in warnings)
@@ -512,6 +551,13 @@ def send_email(subject: str, markdown: str, html_body: str) -> None:
             server.send_message(message)
 
 
+def save_state(state_path, state):
+    state_path.parent.mkdir(parents=True, exist_ok=True)
+    temp = state_path.with_suffix(".tmp")
+    temp.write_text(json_state(state), encoding="utf-8")
+    temp.replace(state_path)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", default="config/journal_digest.yaml")
@@ -538,21 +584,32 @@ def main(argv: list[str] | None = None) -> int:
     report += f"\n抓取完成时间：{checked_at}；日期核实以本次接口返回的元数据为准。\n"
     report_path = report_dir / f"{today.isoformat()}.md"
     report_path.write_text(report, encoding="utf-8")
+    (report_dir / f"{today.isoformat()}-date-verification.json").write_text(
+        json_state(state.get("date_verification_audit", {})), encoding="utf-8")
+    held = sum(state.get("date_verification_audit", {}).get(key, {}).get("status") != "verified"
+               for key in state.get("pending_date_checks", {}))
     print(f"Report: {report_path} | Newly discovered: {total} | raw counts: {stats} | dry_run={dry_run}", flush=True)
     summary = os.getenv("GITHUB_STEP_SUMMARY")
     if summary:
         with open(summary, "a", encoding="utf-8") as fp:
             fp.write(f"### Journal digest: {today.isoformat()} UTC\n\n")
             fp.write(f"- New: **{total}**; dry run: **{dry_run}**\n")
+            fp.write(f"- Date verification pending/failed: **{held}**; unverified articles excluded from email.\n")
             fp.write("\n".join(f"- {name}: {len(papers)}" for name, papers in groups.items()) + "\n")
             fp.write("\n".join(f"- {name} 本次可核实最新在线日期: {value}" for name, value in source_status.items()) + "\n")
             if warnings:
                 fp.write("\n".join(f"- ⚠️ {warning}" for warning in warnings) + "\n")
     if dry_run:
         return 0
+    # Persist pending checks before SMTP without advancing delivery / scan state.
+    # Even if SMTP fails, the next run can retry all held and unsent articles.
+    save_state(state_path, state)
     if not total and not warnings and not bool(config.get("send_when_empty", False)):
         print("No new papers; email skipped.")
     else:
+        for papers in groups.values():
+            for paper in papers:
+                assert_verified(paper.get("date_verification"), paper["doi"], paper.get("online_date"), today)
         recent = sum(p.get("freshness") == "recent_online" for papers in groups.values() for p in papers)
         subject = f"[期刊日报] {today.isoformat()} | 近期在线 {recent} 篇 / 新发现及补录 {total} 篇"
         if warnings:
@@ -561,12 +618,12 @@ def main(argv: list[str] | None = None) -> int:
     # Never advance on source degradation or failed SMTP; empty successful scans
     # still persist their progress so the next index query has a known boundary.
     state["seen"].update({key: today.isoformat() for key in keys})
+    for papers in groups.values():
+        for paper in papers:
+            state.get("pending_date_checks", {}).pop(paper["doi"], None)
     if not warnings:
         state["last_successful_fetch"] = today.isoformat()
-    state_path.parent.mkdir(parents=True, exist_ok=True)
-    temp = state_path.with_suffix(".tmp")
-    temp.write_text(json.dumps(state, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    temp.replace(state_path)
+    save_state(state_path, state)
     print(f"Saved delivery / fetch state: {state_path}")
     return 0
 
