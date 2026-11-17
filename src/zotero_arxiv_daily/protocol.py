@@ -49,6 +49,13 @@ class Paper:
     affiliations: Optional[list[str]] = None
     score: Optional[float] = None
     journal: Optional[str] = None
+    doi: Optional[str] = None
+    online_date: Optional[str] = None
+    publication_date: Optional[str] = None
+    publication_date_kind: Optional[str] = None
+    publication_date_source: Optional[str] = None
+    freshness: Optional[str] = None
+    tldr_status: Optional[str] = None
 
     def _generate_tldr_with_llm(self, openai_client:OpenAI,llm_params:dict) -> str:
         lang = llm_params.get('language', 'English')
@@ -88,14 +95,22 @@ class Paper:
         return tldr
     
     def generate_tldr(self, openai_client:OpenAI,llm_params:dict) -> str:
+        if not self.full_text and not self.abstract:
+            self.tldr_status = "unavailable"
+            self.tldr = self._generate_tldr_with_llm(openai_client, llm_params)
+            return self.tldr
         try:
             tldr = self._generate_tldr_with_llm(openai_client,llm_params)
+            if not isinstance(tldr, str) or not tldr.strip():
+                raise ValueError("LLM returned no summary text")
             self.tldr = tldr
+            self.tldr_status = "generated"
             return tldr
         except Exception as e:
             logger.warning(f"Failed to generate tldr of {self.url}: {e}")
             tldr = self.abstract
             self.tldr = tldr
+            self.tldr_status = "abstract_fallback"
             return tldr
 
     def _generate_affiliations_with_llm(self, openai_client:OpenAI,llm_params:dict) -> Optional[list[str]]:

@@ -34,9 +34,9 @@ class Executor:
         self.config = config
         self.include_path_patterns = normalize_path_patterns(config.zotero.include_path, "include_path")
         self.ignore_path_patterns = normalize_path_patterns(config.zotero.ignore_path, "ignore_path")
-        self.retrievers = {
-            source: get_retriever_cls(source)(config) for source in config.executor.source
-        }
+        self.journals_only = config.executor.get("journals_only", False)
+        sources = ["journals"] if self.journals_only else config.executor.source
+        self.retrievers = {source: get_retriever_cls(source)(config) for source in sources}
         self.reranker = get_reranker_cls(config.executor.reranker)(config)
         self.openai_client = OpenAI(api_key=config.llm.api.key, base_url=config.llm.api.base_url)
     def fetch_zotero_corpus(self) -> list[CorpusPaper]:
@@ -110,15 +110,30 @@ class Executor:
         if len(all_papers) > 0:
             logger.info("Reranking papers...")
             reranked_papers = self.reranker.rerank(all_papers, corpus)
+            if self.journals_only:
+                priority = {"recent_online": 2, "unverified": 1, "late_record": 0}
+                reranked_papers.sort(key=lambda p: (
+                    priority.get(p.freshness, 1), p.online_date or "",
+                    p.score if p.score is not None else float("-inf"),
+                ), reverse=True)
             reranked_papers = reranked_papers[:self.config.executor.max_paper_num]
             logger.info("Generating TLDR and affiliations...")
             for p in tqdm(reranked_papers):
                 p.generate_tldr(self.openai_client, self.config.llm)
-                p.generate_affiliations(self.openai_client, self.config.llm)
+                if p.affiliations is None:
+                    p.generate_affiliations(self.openai_client, self.config.llm)
         elif not self.config.executor.send_empty:
             logger.info("No new papers found. No email will be sent.")
+            self._mark_delivered([])
             return
         logger.info("Sending email...")
         email_content = render_email(reranked_papers)
         send_email(self.config, email_content)
+        self._mark_delivered(reranked_papers)
         logger.info("Email sent successfully")
+
+    def _mark_delivered(self, papers):
+        for retriever in self.retrievers.values():
+            mark_delivered = getattr(retriever, "mark_delivered", None)
+            if mark_delivered is not None:
+                mark_delivered(papers)

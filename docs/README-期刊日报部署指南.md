@@ -1,6 +1,10 @@
 # Zotero-arxiv-daily：独立的指定期刊每日新论文邮件
 
-本补丁为 `XyynBldy/zotero-arxiv-daily` 增加 **一个独立 GitHub Actions Workflow**，不替换原有 Zotero/arXiv AI 推荐邮件。它仅采集题录，不下载 PDF、不生成 LLM 摘要，因此适合订阅较多期刊并每天接收最新文章的**完整目录**。
+本仓库提供独立的**期刊完整目录日报**，仅采集题录，不下载 PDF、不生成 LLM 摘要。它与按 Zotero 兴趣排序的期刊推荐邮件并行运行。
+
+原有推荐邮件也限定为期刊：`Send emails daily` / `Test` 强制 `executor.journals_only=true`，订阅范围来自 `CUSTOM_CONFIG` 中的 `source.journals.issns`（未覆盖时用 `config/base.yaml` 默认值）。旧配置中的 arXiv 来源不再执行。推荐邮件显示期刊名、在线日期及依据、补录 / 待核实状态；AI 连接失败时标为“原文摘要（AI 生成失败）”。两条流程使用各自的订阅列表与去重状态。
+
+推荐邮件的已发送 DOI 与成功抓取日期保存在 `state/recommendation-journals.json`，SMTP 接受后才更新；正常零篇也推进抓取进度，debug 不写状态。定时任务会提交该文件，自动暂存和恢复运行时 `CUSTOM_CONFIG` 的改动后再同步状态。状态提交失败仍可能造成下次重复，需检查 Actions 最后一步。
 
 ## 一、包含文件（相对仓库根目录）
 

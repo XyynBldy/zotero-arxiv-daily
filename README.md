@@ -25,6 +25,8 @@
 > [!IMPORTANT]
 > Please keep an eye on this repo, and merge your forked repo in time when there is any update of this upstream, in order to enjoy new features and fix found bugs.
 
+> **本分支的当前部署策略：仅推送已订阅期刊。** 定时推荐使用 `source.journals.issns` 的 ISSN 白名单；`executor.journals_only=true` 会忽略旧 `CUSTOM_CONFIG` 中混入的 arXiv 等来源。邮件显示期刊名、在线发表日期及日期依据；未知日期标为待核实，AI 失败时明确展示原文摘要。独立期刊目录日报使用 `config/journal_digest.yaml` 的订阅列表，两条流程分别去重。
+
 ## 🧐 About <a name = "about"></a>
 
 > Track new scientific researches of your interest by just forking (and staring) this repo!😊
@@ -101,7 +103,8 @@ source:
 
 executor:
   debug: ${oc.env:DEBUG,null}
-  source: ['arxiv']
+  source: ['journals']
+  journals_only: true
 ```
 Set `source.arxiv.include_cross_list: true` if you want cross-listed papers included.
 >[!NOTE]

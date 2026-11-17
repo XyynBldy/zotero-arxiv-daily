@@ -4,6 +4,13 @@ on:
   schedule:
     - cron: '0 10 * * *'
 
+permissions:
+  contents: write
+
+concurrency:
+  group: journal-recommendations-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   calculate-and-send:
     runs-on: ubuntu-latest
@@ -11,8 +18,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v6
         with:
-          repository: ${{ vars.REPOSITORY }}
-          ref: ${{ vars.REF }}
+          ref: ${{ github.ref_name }}
 
       - name: Setup uv
         uses: astral-sh/setup-uv@v7
@@ -31,4 +37,20 @@ jobs:
           printf "%b\n" "$CUSTOM_CONFIG" > config/custom.yaml
           echo "Use custom config: "
           cat config/custom.yaml
-          uv run src/zotero_arxiv_daily/main.py
+          uv run src/zotero_arxiv_daily/main.py executor.journals_only=true 'executor.source=[journals]'
+
+      - name: Persist journal recommendation delivery state
+        run: |
+          state_file=state/recommendation-journals.json
+          if [ ! -f "$state_file" ]; then
+            exit 0
+          fi
+          if git diff --quiet -- "$state_file" && [ -z "$(git ls-files --others --exclude-standard "$state_file")" ]; then
+            exit 0
+          fi
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add "$state_file"
+          git commit -m 'chore: persist journal recommendation delivery state [skip ci]'
+          git pull --rebase --autostash origin "${GITHUB_REF_NAME}"
+          git push origin "HEAD:${GITHUB_REF_NAME}"
